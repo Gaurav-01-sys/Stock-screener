@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { MessageCircle, X, Send, Bot, User, Loader2, Lightbulb, Brain, ChevronDown } from 'lucide-react'
+import { MessageCircle, X, Send, Bot, User, Loader2, Lightbulb, Brain, ChevronDown, Trash2 } from 'lucide-react'
 
 const API = import.meta.env.VITE_API_URL || ''
 
@@ -216,13 +216,26 @@ export default function ChatBot({ sessionId, lastAnalysed }) {
   }, [lastAnalysed])
 
   // Initial welcome message
+  const initialMessage = {
+    role: 'assistant',
+    content: '👋 Hi! I\'m your **FMCG memory assistant**.\n\nAnalyse a stock using the search bar above, then ask me questions like:\n- *What is AAPL\'s score?*\n- *Compare AAPL and MSFT*\n- *Explain the F-score for PG*\n- *What have we analysed?*',
+    timestamp: Date.now() / 1000,
+  }
+
   useEffect(() => {
-    setMessages([{
-      role: 'assistant',
-      content: '👋 Hi! I\'m your **FMCG memory assistant**.\n\nAnalyse a stock using the search bar above, then ask me questions like:\n- *What is AAPL\'s score?*\n- *Compare AAPL and MSFT*\n- *Explain the F-score for PG*\n- *What have we analysed?*',
-      timestamp: Date.now() / 1000,
-    }])
+    setMessages([initialMessage])
   }, [])
+
+  const clearChat = async () => {
+    try {
+      await fetch(`${API}/api/chat/${sessionId}`, { method: 'DELETE' })
+    } catch (e) {
+      console.error('Failed to clear chat on backend', e)
+    }
+    setMessages([{ ...initialMessage, timestamp: Date.now() / 1000 }])
+    setSuggestions([])
+    setTickerCount(0)
+  }
 
   const sendMessage = async (text) => {
     const msg = (text || input).trim()
@@ -285,13 +298,21 @@ export default function ChatBot({ sessionId, lastAnalysed }) {
         )}
       </button>
 
-      {/* Chat panel */}
-      <div className={`fixed bottom-24 right-6 z-50 w-[360px] max-w-[calc(100vw-24px)]
-        rounded-2xl shadow-2xl border border-white/10 overflow-hidden
-        flex flex-col transition-all duration-300 origin-bottom-right
-        ${open ? 'opacity-100 scale-100 pointer-events-auto' : 'opacity-0 scale-90 pointer-events-none'}
+      {/* Overlay when open */}
+      {open && (
+        <div
+          className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity"
+          onClick={() => setOpen(false)}
+        />
+      )}
+
+      {/* Chat panel (Sidebar) */}
+      <div className={`fixed top-0 right-0 z-50 w-[400px] h-screen max-w-full
+        border-l border-white/10 overflow-hidden shadow-2xl
+        flex flex-col transition-transform duration-300
+        ${open ? 'translate-x-0' : 'translate-x-full'}
       `}
-        style={{ height: '520px', background: 'linear-gradient(160deg, #1e1b4b 0%, #1e293b 100%)' }}
+        style={{ background: 'linear-gradient(160deg, #1e1b4b 0%, #1e293b 100%)' }}
       >
         {/* Header */}
         <div className="flex items-center gap-3 px-4 py-3
@@ -308,12 +329,21 @@ export default function ChatBot({ sessionId, lastAnalysed }) {
                 : 'Analyse a stock to get started'}
             </p>
           </div>
-          <button
-            onClick={() => setOpen(false)}
-            className="w-7 h-7 rounded-lg hover:bg-white/10 flex items-center justify-center transition-colors"
-          >
-            <X className="w-4 h-4 text-slate-400" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={clearChat}
+              title="Clear Chat"
+              className="w-7 h-7 rounded-lg hover:bg-red-500/20 text-slate-400 hover:text-red-400 flex items-center justify-center transition-colors"
+            >
+              <Trash2 className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setOpen(false)}
+              className="w-7 h-7 rounded-lg hover:bg-white/10 flex items-center justify-center transition-colors"
+            >
+              <X className="w-4 h-4 text-slate-400" />
+            </button>
+          </div>
         </div>
 
         {/* Messages */}

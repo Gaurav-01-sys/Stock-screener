@@ -30,7 +30,8 @@ from typing import Any, Dict, Generator, List, Optional
 
 from dotenv import load_dotenv
 
-load_dotenv()
+env_path = Path(__file__).resolve().parent.parent / "config" / ".env"
+load_dotenv(dotenv_path=env_path)
 
 # ---------- Context (propagates parent run across async calls) ----------
 _current_run: ContextVar[Optional["TraceRun"]] = ContextVar("current_run", default=None)

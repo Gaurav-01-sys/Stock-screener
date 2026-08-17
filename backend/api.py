@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from typing import Optional, Dict
 
 from memory.conversation import ConversationBuffer
-from memory.chat_engine import ChatEngine
+from memory.chat_engine import ChatEngine, clear_session_history
 
 # Per-session conversation buffers  { session_id: ConversationBuffer }
 _sessions: Dict[str, ConversationBuffer] = {}
@@ -130,6 +130,15 @@ async def chat(req: ChatRequest):
             for m in buf.get_visible_history()[-40:]
         ],
     }
+
+
+@app.delete("/api/chat/{session_id}")
+async def clear_chat(session_id: str):
+    """Clear conversation history for a given session."""
+    if session_id in _sessions:
+        del _sessions[session_id]
+    clear_session_history(session_id)
+    return {"message": "Chat history cleared"}
 
 
 @app.get("/api/scorecard/{symbol}")

@@ -13,9 +13,11 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+env_path = Path(__file__).resolve().parent.parent / "config" / ".env"
+load_dotenv(dotenv_path=env_path)
 
 # LangChain Imports (Lesson 8)
 from langchain_core.chat_history import InMemoryChatMessageHistory
@@ -39,6 +41,12 @@ def get_session_history(session_id: str) -> InMemoryChatMessageHistory:
     if session_id not in _session_history_store:
         _session_history_store[session_id] = InMemoryChatMessageHistory()
     return _session_history_store[session_id]
+
+
+def clear_session_history(session_id: str):
+    """Clear memory for a specific session."""
+    if session_id in _session_history_store:
+        del _session_history_store[session_id]
 
 
 # ---------------------------------------------------------------------------
