@@ -285,9 +285,9 @@ export default function App() {
                     )}
                     {(data.details?.C?.news || []).slice(0, 5).map((n, i) => (
                       <div key={i} className="text-xs border-b border-slate-800/80 pb-2.5 last:border-0">
-                        <p className="font-semibold text-slate-200 line-clamp-2 hover:text-blue-400 transition-colors">
+                        <a href={n.link} target="_blank" rel="noopener noreferrer" className="font-semibold text-slate-200 line-clamp-2 hover:text-blue-400 transition-colors block">
                           {n.title}
-                        </p>
+                        </a>
                         <p className="text-[10px] text-slate-500 mt-1 font-mono">{n.publisher}</p>
                       </div>
                     ))}
