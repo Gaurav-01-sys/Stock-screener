@@ -77,6 +77,16 @@ class TickerRequest(BaseModel):
     symbol: str
 
 
+@app.get("/")
+async def root():
+    return {"message": "FMCG Agentic Scorecard API is running. Check /health for status."}
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    return {"message": "No favicon"}
+
+
 @app.get("/health")
 async def health():
     from tracing import tracer
