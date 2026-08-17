@@ -1,0 +1,137 @@
+# ──────────────────────────────────────────────────────────────
+# FMCG Scorecard Pro – Governance Policy (Microsoft AGT-style)
+# OWASP Agentic Top 10 (ASI-01 → ASI-10) coverage
+# ──────────────────────────────────────────────────────────────
+
+apiVersion: governance.fmcg/v1
+name: fmcg-scorecard-policy
+
+# ── Default posture ────────────────────────────────────────
+default_action: deny          # Zero-trust: deny unless explicitly allowed
+
+# ── ASI-02  Capability allow-lists (RBAC) ──────────────────
+capabilities:
+  router:
+    - route
+    - a2a_send
+  financial_agent:
+    - yfinance.get_financials
+    - yfinance.get_ticker_info
+    - score.financial
+    - score.piotroski
+  momentum_agent:
+    - yfinance.get_price_history
+    - yfinance.get_ticker_info
+    - score.momentum
+  credibility_agent:
+    - yfinance.get_holders
+    - yfinance.get_ticker_news
+    - score.credibility
+  growth_agent:
+    - yfinance.get_top
+    - yfinance.get_ticker_info
+    - yfinance.get_financials
+    - score.growth
+  synthesizer:
+    - score.aggregate
+    - a2a_receive
+
+# ── ASI-01  Input sanitisation / prompt-injection guard ────
+input_guards:
+  prompt_injection_keywords:
+    - "ignore previous instructions"
+    - "ignore all instructions"
+    - "disregard above"
+    - "system prompt"
+    - "you are now"
+    - "act as"
+    - "jailbreak"
+    - "DAN mode"
+    - "override safety"
+    - "bypass filter"
+  max_query_length: 500
+
+# ── ASI-03  Output sanitisation ────────────────────────────
+output_guards:
+  strip_html_tags: true
+  max_output_size_bytes: 524288   # 512 KB
+
+# ── ASI-05  Resource budgets & rate limits ─────────────────
+resource_limits:
+  max_tool_calls_per_request: 25
+  max_tool_calls_per_agent: 10
+  max_requests_per_minute: 30
+  max_session_tool_calls: 200
+
+# ── ASI-06  Identity / impersonation protection ────────────
+identity:
+  require_agent_registration: true
+  trust_score_minimum: 0.3
+
+# ── ASI-07  Tool parameter validation ─────────────────────
+param_validation:
+  ticker_pattern: "^[A-Z]{1,5}$"
+  period_allowed:
+    - "1d"
+    - "5d"
+    - "1mo"
+    - "3mo"
+    - "6mo"
+    - "1y"
+    - "2y"
+    - "5y"
+    - "10y"
+    - "ytd"
+    - "max"
+  interval_allowed:
+    - "1m"
+    - "2m"
+    - "5m"
+    - "15m"
+    - "30m"
+    - "60m"
+    - "90m"
+    - "1h"
+    - "1d"
+    - "5d"
+    - "1wk"
+    - "1mo"
+    - "3mo"
+  max_count: 50
+
+# ── ASI-08  Circuit breakers ──────────────────────────────
+circuit_breaker:
+  failure_threshold: 5
+  recovery_timeout_sec: 60
+
+# ── ASI-09  Data-poisoning guardrails ─────────────────────
+data_integrity:
+  verify_data_source: true       # only yfinance feeds accepted
+  allowed_data_sources:
+    - "yfinance"
+  anomaly_thresholds:
+    price_max: 1000000           # any price > $1M flagged
+    price_min: 0.0001
+    score_max: 100
+    score_min: 0
+
+# ── ASI-10  Kill switch & sandbox ─────────────────────────
+kill_switch:
+  enabled: false                  # toggled at runtime via API
+  
+# ── ASI-04  Audit chain settings ──────────────────────────
+audit:
+  log_path: "./logs/audit.jsonl"
+  chain_algorithm: "sha256"
+  sign_records: true              # tamper-evident signature on each record
+
+# ── Dangerous operations – HARD BLOCKED ───────────────────
+blocked_operations:
+  - shell_exec
+  - file_delete
+  - file_write
+  - drop_table
+  - send_email
+  - network_scan
+  - code_eval
+  - os_command
