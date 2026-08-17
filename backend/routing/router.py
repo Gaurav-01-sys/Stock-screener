@@ -61,7 +61,7 @@ class RouterAgent:
         m = re.search(r"\b([A-Z]{1,5})\b", q)
         return m.group(1) if m else None
 
-    async def handle(self, query: str) -> Dict[str, Any]:
+    async def handle(self, query: str, momentum_period: str = "6mo") -> Dict[str, Any]:
         from tracing import tracer
 
         with tracer.run(
@@ -98,7 +98,7 @@ class RouterAgent:
                 tracer.end_with_outputs(span, {"score": f_result.get("score"), "piotroski": f_result.get("piotroski")})
 
             with tracer.run("agent.momentum", run_type="agent", inputs={"ticker": ticker}) as span:
-                m_result = await self.momentum.run(ticker)
+                m_result = await self.momentum.run(ticker, momentum_period=momentum_period)
                 tracer.end_with_outputs(span, {"score": m_result.get("score"), "returns": m_result.get("returns")})
 
             with tracer.run("agent.credibility", run_type="agent", inputs={"ticker": ticker}) as span:

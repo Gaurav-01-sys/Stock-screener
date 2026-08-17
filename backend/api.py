@@ -66,6 +66,7 @@ router = RouterAgent(
 class ScoreRequest(BaseModel):
     query: str
     session_id: Optional[str] = None
+    momentum_period: Optional[str] = "6mo"
 
 
 class ChatRequest(BaseModel):
@@ -105,7 +106,7 @@ async def health():
 @app.post("/api/scorecard")
 async def scorecard(req: ScoreRequest):
     """Run full agentic FMCG scorecard pipeline (traced)."""
-    result = await router.handle(req.query)
+    result = await router.handle(req.query, momentum_period=req.momentum_period or "6mo")
     if "error" in result and "scores" not in result:
         raise HTTPException(status_code=400, detail=result["error"])
 

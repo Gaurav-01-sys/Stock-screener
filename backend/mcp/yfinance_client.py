@@ -107,18 +107,36 @@ class YFinanceClient:
         self,
         symbol: str,
         period: str = "6mo",
-        interval: str = "1d",
+        interval: Optional[str] = None,
     ) -> Dict[str, Any]:
         try:
+            if not interval:
+                if period in ["1d", "5d"]:
+                    interval = "5m"
+                elif period in ["1mo", "3mo", "6mo"]:
+                    interval = "1d"
+                elif period in ["1y", "ytd", "2y", "3y", "5y", "10y"]:
+                    interval = "1wk"
+                elif period == "max":
+                    interval = "1mo"
+                else:
+                    interval = "1d"
+
+            actual_period = "5y" if period == "3y" else period
+
             t = yf.Ticker(symbol.upper())
-            hist = t.history(period=period, interval=interval)
+            hist = t.history(period=actual_period, interval=interval)
             if hist is None or hist.empty:
                 return {"error": "No price history", "symbol": symbol}
 
+            if period == "3y":
+                # ~156 weeks
+                hist = hist.tail(156)
+
             records = []
-            for idx, row in hist.tail(120).iterrows():
+            for idx, row in hist.iterrows():
                 records.append({
-                    "date": str(idx.date()) if hasattr(idx, "date") else str(idx),
+                    "date": str(idx),
                     "open": _safe(row.get("Open")),
                     "high": _safe(row.get("High")),
                     "low": _safe(row.get("Low")),

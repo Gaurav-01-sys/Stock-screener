@@ -263,8 +263,15 @@ class MomentumAgent(BaseAgent):
         )
         super().__init__(identity, governance, bus, yf)
 
-    async def run(self, ticker: str) -> Dict[str, Any]:
-        hist = await self.call_tool("yfinance.get_price_history", symbol=ticker, period="6mo", interval="1d")
+    async def run(self, ticker: str, momentum_period: str = "6mo") -> Dict[str, Any]:
+        # Scoring requires consistent daily data
+        hist_score = await self.call_tool("yfinance.get_price_history", symbol=ticker, period="6mo", interval="1d")
+        
+        if momentum_period == "6mo":
+            hist_chart = hist_score
+        else:
+            hist_chart = await self.call_tool("yfinance.get_price_history", symbol=ticker, period=momentum_period, interval=None)
+
         info = await self.call_tool("yfinance.get_ticker_info", symbol=ticker)
 
         score = 50
@@ -272,8 +279,8 @@ class MomentumAgent(BaseAgent):
         notes = []
         returns = {}
 
-        if "error" not in hist and hist.get("prices"):
-            closes = [p["close"] for p in hist["prices"] if p.get("close")]
+        if "error" not in hist_score and hist_score.get("prices"):
+            closes = [p["close"] for p in hist_score["prices"] if p.get("close")]
             if len(closes) >= 5:
                 def ret(n):
                     if len(closes) < n + 1:
@@ -306,7 +313,7 @@ class MomentumAgent(BaseAgent):
                         score = 25
                 notes.append("Momentum from real OHLCV history")
         else:
-            notes.append(f"Price history issue: {hist.get('error')}")
+            notes.append(f"Price history issue: {hist_score.get('error')}")
 
         if "error" not in info and info.get("currentPrice"):
             metrics.append({"name": "Price", "value": f"{info.get('currentPrice')}"})
@@ -318,7 +325,7 @@ class MomentumAgent(BaseAgent):
             "metrics": metrics,
             "notes": notes,
             "returns": returns,
-            "price_history": hist.get("prices", [])[-60:] if "error" not in hist else [],
+            "price_history": hist_chart.get("prices", []) if "error" not in hist_chart else [],
         }
 
 

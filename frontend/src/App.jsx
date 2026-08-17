@@ -25,6 +25,12 @@ export default function App() {
   const [lastAnalysed, setLastAnalysed] = useState(null)
   const [govOpen, setGovOpen] = useState(false)
   const [activeTab, setActiveTab] = useState('all') // all | financials | momentum | peers
+  const [momentumPeriod, setMomentumPeriod] = useState('6mo')
+
+  const PERIOD_LABELS = {
+    '1d': 'Daily', '5d': 'Weekly', '1mo': '1 Month', '3mo': 'Quarterly',
+    '6mo': 'Half Yearly', '1y': '1 Year', '2y': '2 Years', '3y': '3 Years', 'max': 'All Time',
+  }
 
   const runScorecard = async (q) => {
     const text = (q || query).trim()
@@ -36,7 +42,7 @@ export default function App() {
       const res = await fetch(`${API}/api/scorecard`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: text, session_id: sessionId }),
+        body: JSON.stringify({ query: text, session_id: sessionId, momentum_period: momentumPeriod }),
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.detail || json.error || 'Request failed')
@@ -93,22 +99,33 @@ export default function App() {
             Piotroski F-Score · Price Momentum · Credibility Signals · Sector Peer Benchmarking
           </p>
 
-          <div className="relative">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && runScorecard()}
-              placeholder="Search ticker symbol (e.g. AAPL, MSFT, NVDA, PG)"
-              className="w-full pl-12 pr-32 py-4 rounded-2xl border border-slate-800 bg-slate-900/90 text-white placeholder-slate-500 shadow-2xl text-base focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-all"
-            />
-            <button
-              onClick={() => runScorecard()}
-              disabled={loading}
-              className="absolute right-2 top-1/2 -translate-y-1/2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-sm font-bold shadow-lg shadow-blue-500/25 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 transition-all cursor-pointer"
+          <div className="relative flex gap-2">
+            <div className="relative flex-1">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && runScorecard()}
+                placeholder="Search ticker symbol (e.g. AAPL, MSFT, NVDA, PG)"
+                className="w-full pl-12 pr-32 py-4 rounded-2xl border border-slate-800 bg-slate-900/90 text-white placeholder-slate-500 shadow-2xl text-base focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-all"
+              />
+              <button
+                onClick={() => runScorecard()}
+                disabled={loading}
+                className="absolute right-2 top-1/2 -translate-y-1/2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-sm font-bold shadow-lg shadow-blue-500/25 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 transition-all cursor-pointer"
+              >
+                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Analyze'}
+              </button>
+            </div>
+            <select
+              value={momentumPeriod}
+              onChange={(e) => setMomentumPeriod(e.target.value)}
+              className="px-3 py-2 rounded-2xl border border-slate-800 bg-slate-900/90 text-slate-300 text-sm font-medium shadow-2xl focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-all cursor-pointer hover:border-slate-700 min-w-[140px]"
             >
-              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Analyze'}
-            </button>
+              {Object.entries(PERIOD_LABELS).map(([val, label]) => (
+                <option key={val} value={val} className="bg-slate-900">{label}</option>
+              ))}
+            </select>
           </div>
 
           {/* Example Tickers */}
@@ -257,7 +274,7 @@ export default function App() {
                         <TrendingUp className="w-4 h-4 text-blue-400" />
                         Price History & Trend (Momentum Agent)
                       </h3>
-                      <span className="text-[10px] font-mono text-slate-500">6M OHLCV</span>
+                      <span className="text-[10px] font-mono text-slate-500">{PERIOD_LABELS[data.details?.M?.price_history?.[0] ? momentumPeriod : '6mo'] || '6M'} OHLCV</span>
                     </div>
                     <PriceChart prices={data.details?.M?.price_history || []} />
                   </div>
