@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import {
   Search, TrendingUp, Shield, BarChart3, Leaf, Loader2, AlertCircle,
   Newspaper, Users, Layers, Activity, Sparkles, SlidersHorizontal
@@ -20,12 +20,26 @@ export default function App() {
 
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
+  // settling: true from the moment data arrives until the full scorecard
+  // has painted into the DOM (cleared after the next browser frame).
+  const [settling, setSettling] = useState(false)
   const [error, setError] = useState(null)
   const [data, setData] = useState(null)
   const [lastAnalysed, setLastAnalysed] = useState(null)
   const [govOpen, setGovOpen] = useState(false)
   const [activeTab, setActiveTab] = useState('all') // all | financials | momentum | peers
   const [momentumPeriod, setMomentumPeriod] = useState('6mo')
+
+  // Unlock controls only after the scorecard has fully painted.
+  // requestAnimationFrame fires after the browser has committed the render.
+  useEffect(() => {
+    if (!data) return
+    const raf = requestAnimationFrame(() => setSettling(false))
+    return () => cancelAnimationFrame(raf)
+  }, [data])
+
+  // Single derived lock used by every interactive control.
+  const locked = loading || settling
 
   const PERIOD_LABELS = {
     '1d': 'Daily', '5d': 'Weekly', '1mo': '1 Month', '3mo': 'Quarterly',
@@ -34,8 +48,9 @@ export default function App() {
 
   const runScorecard = async (q) => {
     const text = (q || query).trim()
-    if (!text) return
+    if (!text || locked) return
     setLoading(true)
+    setSettling(false)
     setError(null)
     setData(null)
     try {
@@ -46,6 +61,9 @@ export default function App() {
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.detail || json.error || 'Request failed')
+      // Mark settling BEFORE clearing loading so the lock stays held
+      // for exactly one more render frame while the scorecard paints.
+      setSettling(true)
       setData(json)
       setLastAnalysed(json)
     } catch (e) {
@@ -105,22 +123,24 @@ export default function App() {
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && runScorecard()}
+                onKeyDown={(e) => e.key === 'Enter' && !locked && runScorecard()}
+                disabled={locked}
                 placeholder="Search ticker symbol (e.g. AAPL, MSFT, NVDA, PG)"
-                className="w-full pl-12 pr-32 py-4 rounded-2xl border border-slate-800 bg-slate-900/90 text-white placeholder-slate-500 shadow-2xl text-base focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-all"
+                className="w-full pl-12 pr-32 py-4 rounded-2xl border border-slate-800 bg-slate-900/90 text-white placeholder-slate-500 shadow-2xl text-base focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
               />
               <button
                 onClick={() => runScorecard()}
-                disabled={loading}
-                className="absolute right-2 top-1/2 -translate-y-1/2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-sm font-bold shadow-lg shadow-blue-500/25 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 transition-all cursor-pointer"
+                disabled={locked}
+                className="absolute right-2 top-1/2 -translate-y-1/2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-sm font-bold shadow-lg shadow-blue-500/25 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all cursor-pointer"
               >
-                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Analyze'}
+                {locked ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Analyze'}
               </button>
             </div>
             <select
               value={momentumPeriod}
               onChange={(e) => setMomentumPeriod(e.target.value)}
-              className="px-3 py-2 rounded-2xl border border-slate-800 bg-slate-900/90 text-slate-300 text-sm font-medium shadow-2xl focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-all cursor-pointer hover:border-slate-700 min-w-[140px]"
+              disabled={locked}
+              className="px-3 py-2 rounded-2xl border border-slate-800 bg-slate-900/90 text-slate-300 text-sm font-medium shadow-2xl focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-all cursor-pointer hover:border-slate-700 min-w-[140px] disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {Object.entries(PERIOD_LABELS).map(([val, label]) => (
                 <option key={val} value={val} className="bg-slate-900">{label}</option>
@@ -134,8 +154,9 @@ export default function App() {
             {EXAMPLES.map((s) => (
               <button
                 key={s}
-                onClick={() => { setQuery(s); runScorecard(s) }}
-                className="px-2.5 py-1 rounded-lg bg-slate-900/80 border border-slate-800 text-xs font-mono font-medium text-slate-400 hover:border-slate-700 hover:text-white transition-all cursor-pointer"
+                onClick={() => { if (!locked) { setQuery(s); runScorecard(s) } }}
+                disabled={locked}
+                className="px-2.5 py-1 rounded-lg bg-slate-900/80 border border-slate-800 text-xs font-mono font-medium text-slate-400 hover:border-slate-700 hover:text-white transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-slate-800 disabled:hover:text-slate-400"
               >
                 {s}
               </button>
@@ -143,16 +164,22 @@ export default function App() {
           </div>
         </div>
 
-        {/* Loading state */}
-        {loading && (
+        {/* Loading state — shown while fetching OR while the scorecard is settling into the DOM */}
+        {locked && (
           <div className="flex flex-col items-center justify-center py-24 text-slate-400">
             <div className="relative">
               <div className="w-16 h-16 rounded-2xl bg-blue-600/10 border border-blue-500/20 flex items-center justify-center mb-4">
                 <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
               </div>
             </div>
-            <p className="text-base font-bold text-white">Evaluating Stock Intelligence…</p>
-            <p className="text-xs text-slate-500 mt-1">Routing specialist agents (F · M · C · G) + AGT Policy Checks</p>
+            <p className="text-base font-bold text-white">
+              {settling ? 'Finalizing analysis…' : 'Evaluating Stock Intelligence…'}
+            </p>
+            <p className="text-xs text-slate-500 mt-1">
+              {settling
+                ? 'Assembling scorecard · Please wait'
+                : 'Routing specialist agents (F · M · C · G) + AGT Policy Checks'}
+            </p>
           </div>
         )}
 
@@ -169,7 +196,7 @@ export default function App() {
         )}
 
         {/* Empty state */}
-        {!loading && !data && !error && (
+        {!locked && !data && !error && (
           <div className="rounded-3xl border border-slate-800/80 bg-slate-900/40 p-12 text-center max-w-3xl mx-auto shadow-2xl backdrop-blur-md">
             <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-500/20 to-indigo-500/20 border border-blue-500/30 flex items-center justify-center mx-auto mb-4 text-blue-400">
               <BarChart3 className="w-7 h-7" />
@@ -197,7 +224,7 @@ export default function App() {
         )}
 
         {/* Main Analytics Dashboard */}
-        {data && (
+        {data && !locked && (
           <div className="space-y-6">
             {/* Tremor Executive KPI Banner */}
             <TremorKPI data={data} />
