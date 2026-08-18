@@ -11,8 +11,13 @@ Tools used by FMCG agents:
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
+import logging
+import time
 import yfinance as yf
 import pandas as pd
+
+
+logger = logging.getLogger(__name__)
 
 
 def _safe(val, default=None):
@@ -47,19 +52,98 @@ def _df_to_records(df: Optional[pd.DataFrame], max_rows: int = 8) -> List[Dict]:
 class YFinanceClient:
     """Direct yfinance client with tool names matching yfinance-mcp style."""
 
+    _INFO_CACHE_TTL_SECONDS = 60
+
+    def __init__(self):
+        # A scorecard asks for the same ticker info from several agents. Cache
+        # successful/partial responses briefly to avoid repeated Yahoo requests
+        # and reduce rate-limit failures on hosted datacenter IPs.
+        self._info_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
+
+    @staticmethod
+    def _first_value(source: Any, *keys: str) -> Any:
+        """Read the first usable value from a dict-like yfinance object."""
+        for key in keys:
+            try:
+                value = source.get(key) if hasattr(source, "get") else source[key]
+                value = _safe(value)
+                if value is not None:
+                    return value
+            except Exception:
+                continue
+        return None
+
     async def get_ticker_info(self, symbol: str) -> Dict[str, Any]:
+        symbol = symbol.upper()
+        now = time.monotonic()
+        cached = self._info_cache.get(symbol)
+        if cached and cached[0] > now:
+            return dict(cached[1])
+
+        info_error = None
+        fast_info_error = None
+        history_error = None
         try:
-            t = yf.Ticker(symbol.upper())
-            info = t.info or {}
-            return {
-                "symbol": symbol.upper(),
+            t = yf.Ticker(symbol)
+            try:
+                info = t.info or {}
+            except Exception as exc:
+                info = {}
+                info_error = str(exc)
+
+            current_price = _safe(info.get("currentPrice")) or _safe(info.get("regularMarketPrice"))
+            market_cap = _safe(info.get("marketCap"))
+
+            # fast_info uses price history/metadata and computes market cap from
+            # shares when quoteSummary/info is unavailable.
+            try:
+                fast_info = t.fast_info
+                current_price = current_price or self._first_value(
+                    fast_info, "lastPrice", "last_price", "regularMarketPrice"
+                )
+                market_cap = market_cap or self._first_value(
+                    fast_info, "marketCap", "market_cap"
+                )
+            except Exception as exc:
+                fast_info_error = str(exc)
+                fast_info = None
+
+            # Last-resort price fallback: the chart endpoint is usually still
+            # available when Yahoo's quoteSummary/info endpoint is rate-limited.
+            if current_price is None:
+                try:
+                    history = t.history(period="5d", interval="1d", auto_adjust=False)
+                    if history is not None and not history.empty:
+                        closes = history["Close"].dropna()
+                        if not closes.empty:
+                            current_price = _safe(closes.iloc[-1])
+                except Exception as exc:
+                    history_error = str(exc)
+
+            # Compute market cap from any available shares figure if yfinance's
+            # fast_info could not do so itself.
+            shares = _safe(info.get("sharesOutstanding")) or _safe(info.get("impliedSharesOutstanding"))
+            if shares is None and fast_info is not None:
+                shares = self._first_value(fast_info, "shares")
+            if market_cap is None and shares is not None and current_price is not None:
+                try:
+                    market_cap = float(shares) * float(current_price)
+                except (TypeError, ValueError):
+                    pass
+
+            previous_close = _safe(info.get("previousClose"))
+            if previous_close is None and fast_info is not None:
+                previous_close = self._first_value(fast_info, "previousClose", "previous_close")
+
+            result = {
+                "symbol": symbol,
                 "shortName": info.get("shortName") or info.get("longName"),
                 "longName": info.get("longName"),
                 "sector": info.get("sector"),
                 "industry": info.get("industry"),
-                "marketCap": info.get("marketCap"),
-                "currentPrice": info.get("currentPrice") or info.get("regularMarketPrice"),
-                "previousClose": info.get("previousClose"),
+                "marketCap": market_cap,
+                "currentPrice": current_price,
+                "previousClose": previous_close,
                 "trailingPE": info.get("trailingPE"),
                 "forwardPE": info.get("forwardPE"),
                 "priceToBook": info.get("priceToBook"),
@@ -78,11 +162,34 @@ class YFinanceClient:
                 "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh"),
                 "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow"),
                 "averageVolume": info.get("averageVolume"),
-                "currency": info.get("currency"),
-                "exchange": info.get("exchange"),
+                "currency": info.get("currency") or self._first_value(fast_info, "currency"),
+                "exchange": info.get("exchange") or self._first_value(fast_info, "exchange"),
                 "website": info.get("website"),
                 "longBusinessSummary": (info.get("longBusinessSummary") or "")[:600],
             }
+
+            warnings = []
+            if info_error:
+                warnings.append(f"Ticker.info unavailable: {info_error}")
+            if fast_info_error:
+                warnings.append(f"fast_info unavailable: {fast_info_error}")
+            if history_error:
+                warnings.append(f"Price fallback unavailable: {history_error}")
+
+            if warnings:
+                result["warning"] = "; ".join(warnings)
+                logger.warning("Metadata fallback for %s: %s", symbol, result["warning"])
+
+            meaningful = any(
+                result.get(key) is not None
+                for key in ("shortName", "sector", "industry", "currentPrice", "marketCap")
+            )
+            if not meaningful:
+                result["error"] = result.get("warning") or "No ticker metadata available"
+                return result
+
+            self._info_cache[symbol] = (time.monotonic() + self._INFO_CACHE_TTL_SECONDS, result)
+            return result
         except Exception as e:
             return {"error": str(e), "symbol": symbol}
 
