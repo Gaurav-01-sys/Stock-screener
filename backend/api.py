@@ -3,6 +3,8 @@ FastAPI backend – exposes the FMCG agentic pipeline to the React frontend.
 """
 
 from __future__ import annotations
+import asyncio
+import logging
 import sys
 from pathlib import Path
 
@@ -12,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, Dict
+from typing import Optional, Dict, Literal
 
 from memory.conversation import ConversationBuffer
 from memory.chat_engine import ChatEngine, clear_session_history
@@ -37,6 +39,8 @@ from agents.specialists import (
 from routing.router import RouterAgent
 
 app = FastAPI(title="FMCG Agentic Scorecard API", version="2.0.0")
+logger = logging.getLogger(__name__)
+SCORECARD_TIMEOUT_SECONDS = 90
 
 app.add_middleware(
     CORSMiddleware,
@@ -66,7 +70,9 @@ router = RouterAgent(
 class ScoreRequest(BaseModel):
     query: str
     session_id: Optional[str] = None
-    momentum_period: Optional[str] = "6mo"
+    momentum_period: Literal[
+        "1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "3y", "5y", "10y", "ytd", "max"
+    ] = "6mo"
 
 
 class ChatRequest(BaseModel):
@@ -106,9 +112,35 @@ async def health():
 @app.post("/api/scorecard")
 async def scorecard(req: ScoreRequest):
     """Run full agentic FMCG scorecard pipeline (traced)."""
-    result = await router.handle(req.query, momentum_period=req.momentum_period or "6mo")
+    try:
+        result = await asyncio.wait_for(
+            router.handle(
+                req.query,
+                momentum_period=req.momentum_period or "6mo",
+                session_id=req.session_id,
+            ),
+            timeout=SCORECARD_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Scorecard timed out for query=%r", req.query[:80])
+        raise HTTPException(
+            status_code=504,
+            detail="The market-data provider took too long. Please retry the analysis.",
+        )
+    except Exception:
+        logger.exception("Unhandled scorecard failure for query=%r", req.query[:80])
+        raise HTTPException(
+            status_code=502,
+            detail="Scorecard analysis failed. Please retry the analysis.",
+        )
+
+    if not isinstance(result, dict):
+        logger.error("Router returned invalid scorecard type: %s", type(result).__name__)
+        raise HTTPException(status_code=502, detail="Scorecard returned an invalid response.")
+
     if "error" in result and "scores" not in result:
-        raise HTTPException(status_code=400, detail=result["error"])
+        status = 502 if result.get("error_code") == "SCORECARD_PIPELINE_ERROR" else 400
+        raise HTTPException(status_code=status, detail=result["error"])
 
     # Inject result into session memory
     buf = _get_or_create_buffer(req.session_id)

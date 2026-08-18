@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import hmac
 import json
@@ -126,6 +128,16 @@ class CircuitBreaker:
         }
 
 
+@dataclass
+class RequestBudget:
+    """Resource counters isolated to one scorecard execution."""
+
+    request_id: str
+    session_id: Optional[str] = None
+    tool_calls: int = 0
+    agent_tool_calls: Dict[str, int] = field(default_factory=dict)
+
+
 class RateLimiter:
     def __init__(self, max_per_minute: int = 30):
         self.max_per_minute = max_per_minute
@@ -146,6 +158,9 @@ class GovernanceEngine:
     """
 
     SIGNING_SECRET = "fmcg-agt-v1-secret"
+    _request_budget: ContextVar[Optional[RequestBudget]] = ContextVar(
+        "governance_request_budget", default=None
+    )
 
     def __init__(self, audit_path: Optional[str] = None, policy_path: Optional[str] = None):
         if policy_path is None:
@@ -178,6 +193,7 @@ class GovernanceEngine:
         self._request_tool_calls: Dict[str, int] = {}
         self._agent_tool_calls: Dict[str, int] = {}
         self._session_tool_calls: int = 0
+        self._session_tool_counts: Dict[str, int] = {}
         self._total_evaluations: int = 0
         self._total_denials: int = 0
         self._prompt_defense_triggers: int = 0
@@ -207,6 +223,29 @@ class GovernanceEngine:
             with open(path, "r", encoding="utf-8") as f:
                 return yaml.safe_load(f) or {}
         return {}
+
+    @contextmanager
+    def request_scope(
+        self,
+        request_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ):
+        """Scope per-request and per-agent budgets to one execution.
+
+        The governance object is shared by the application, so these counters
+        must not be stored only on the engine itself. Context variables keep
+        concurrent ASGI requests isolated from one another.
+        """
+
+        budget = RequestBudget(
+            request_id=request_id or str(uuid.uuid4()),
+            session_id=session_id,
+        )
+        token = self._request_budget.set(budget)
+        try:
+            yield budget
+        finally:
+            self._request_budget.reset(token)
 
     def register_agent(self, identity: AgentIdentity):
         self.identities[identity.agent_id] = identity
@@ -283,23 +322,41 @@ class GovernanceEngine:
         # ASI-05: Resource Budgets & Rate Limiter
         if action == "tool_call":
             self._session_tool_calls += 1
-            if self._session_tool_calls > self._max_session_tools:
-                return self._deny(agent_id, action, tool_name, input_data,
-                                  f"Session tool-call budget exceeded ({self._max_session_tools})",
-                                  "ASI-05")
+            budget = self._request_budget.get()
+            if budget is not None:
+                session_key = budget.session_id or budget.request_id
+                self._session_tool_counts[session_key] = self._session_tool_counts.get(session_key, 0) + 1
+                if self._session_tool_counts[session_key] > self._max_session_tools:
+                    return self._deny(
+                        agent_id, action, tool_name, input_data,
+                        f"Session tool-call budget exceeded ({self._max_session_tools})",
+                        "ASI-05",
+                    )
+                budget.tool_calls += 1
+                if budget.tool_calls > self._max_tool_per_request:
+                    return self._deny(
+                        agent_id, action, tool_name, input_data,
+                        f"Per-request tool limit exceeded ({self._max_tool_per_request})",
+                        "ASI-05",
+                    )
 
-            if correlation_id and correlation_id in self._request_tool_calls:
-                self._request_tool_calls[correlation_id] += 1
-                if self._request_tool_calls[correlation_id] > self._max_tool_per_request:
-                    return self._deny(agent_id, action, tool_name, input_data,
-                                      f"Per-request tool limit exceeded ({self._max_tool_per_request})",
-                                      "ASI-05")
-
-            self._agent_tool_calls[agent_id] = self._agent_tool_calls.get(agent_id, 0) + 1
-            if self._agent_tool_calls[agent_id] > self._max_tool_per_agent:
-                return self._deny(agent_id, action, tool_name, input_data,
-                                  f"Per-agent tool limit exceeded ({self._max_tool_per_agent})",
-                                  "ASI-05")
+                budget.agent_tool_calls[agent_id] = budget.agent_tool_calls.get(agent_id, 0) + 1
+                if budget.agent_tool_calls[agent_id] > self._max_tool_per_agent:
+                    return self._deny(
+                        agent_id, action, tool_name, input_data,
+                        f"Per-agent tool limit exceeded ({self._max_tool_per_agent})",
+                        "ASI-05",
+                    )
+            else:
+                # Direct callers without a scope retain the old bounded
+                # behavior. HTTP scorecard requests always establish a scope.
+                self._agent_tool_calls[agent_id] = self._agent_tool_calls.get(agent_id, 0) + 1
+                if self._agent_tool_calls[agent_id] > self._max_tool_per_agent:
+                    return self._deny(
+                        agent_id, action, tool_name, input_data,
+                        f"Per-agent tool limit exceeded ({self._max_tool_per_agent}); establish a request scope",
+                        "ASI-05",
+                    )
 
         if action == "route" and not self.rate_limiter.check():
             return self._deny(agent_id, action, tool_name, input_data,
@@ -323,9 +380,8 @@ class GovernanceEngine:
         self._total_denials += 1
         verdict = PolicyVerdict(Decision.DENY, reason, "agt-deny-v4.1", asi_code, agt_report=agt_report)
         self._audit(agent_id, action, tool_name, input_data, verdict)
-        cb = self.circuit_breakers.get(agent_id)
-        if cb:
-            cb.record_failure()
+        # Policy denials are not upstream/tool failures. Counting them as
+        # circuit-breaker failures would poison later valid requests.
         return verdict
 
     def _audit(self, agent_id, action, tool_name, input_data, verdict: PolicyVerdict):

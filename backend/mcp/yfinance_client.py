@@ -11,7 +11,10 @@ Tools used by FMCG agents:
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
+import asyncio
 import logging
+import math
+import threading
 import time
 import yfinance as yf
 import pandas as pd
@@ -28,6 +31,13 @@ def _safe(val, default=None):
             return default
     except Exception:
         pass
+    try:
+        if hasattr(val, "item") and not isinstance(val, (str, bytes, dict, list, tuple)):
+            val = val.item()
+    except Exception:
+        pass
+    if isinstance(val, float) and not math.isfinite(val):
+        return default
     return val
 
 
@@ -59,6 +69,16 @@ class YFinanceClient:
         # successful/partial responses briefly to avoid repeated Yahoo requests
         # and reduce rate-limit failures on hosted datacenter IPs.
         self._info_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
+        # yfinance is synchronous; keep it off the event loop and cap Yahoo
+        # concurrency so repeated analyses do not create a request storm.
+        self._sync_gate = threading.BoundedSemaphore(value=4)
+
+    def _call_sync(self, func, *args, **kwargs):
+        with self._sync_gate:
+            return func(*args, **kwargs)
+
+    async def _yf_call(self, func, *args, **kwargs):
+        return await asyncio.to_thread(self._call_sync, func, *args, **kwargs)
 
     @staticmethod
     def _first_value(source: Any, *keys: str) -> Any:
@@ -84,9 +104,11 @@ class YFinanceClient:
         fast_info_error = None
         history_error = None
         try:
-            t = yf.Ticker(symbol)
+            t = await self._yf_call(yf.Ticker, symbol)
             try:
-                info = t.info or {}
+                info = await self._yf_call(lambda: t.info or {})
+                if not isinstance(info, dict):
+                    info = {}
             except Exception as exc:
                 info = {}
                 info_error = str(exc)
@@ -97,7 +119,7 @@ class YFinanceClient:
             # fast_info uses price history/metadata and computes market cap from
             # shares when quoteSummary/info is unavailable.
             try:
-                fast_info = t.fast_info
+                fast_info = await self._yf_call(lambda: t.fast_info)
                 current_price = current_price or self._first_value(
                     fast_info, "lastPrice", "last_price", "regularMarketPrice"
                 )
@@ -112,7 +134,9 @@ class YFinanceClient:
             # available when Yahoo's quoteSummary/info endpoint is rate-limited.
             if current_price is None:
                 try:
-                    history = t.history(period="5d", interval="1d", auto_adjust=False)
+                    history = await self._yf_call(
+                        t.history, period="5d", interval="1d", auto_adjust=False
+                    )
                     if history is not None and not history.empty:
                         closes = history["Close"].dropna()
                         if not closes.empty:
@@ -135,37 +159,41 @@ class YFinanceClient:
             if previous_close is None and fast_info is not None:
                 previous_close = self._first_value(fast_info, "previousClose", "previous_close")
 
+            def info_value(key: str, default=None):
+                return _safe(info.get(key), default)
+
+            summary = info_value("longBusinessSummary", "")
             result = {
                 "symbol": symbol,
-                "shortName": info.get("shortName") or info.get("longName"),
-                "longName": info.get("longName"),
-                "sector": info.get("sector"),
-                "industry": info.get("industry"),
+                "shortName": info_value("shortName") or info_value("longName"),
+                "longName": info_value("longName"),
+                "sector": info_value("sector"),
+                "industry": info_value("industry"),
                 "marketCap": market_cap,
                 "currentPrice": current_price,
                 "previousClose": previous_close,
-                "trailingPE": info.get("trailingPE"),
-                "forwardPE": info.get("forwardPE"),
-                "priceToBook": info.get("priceToBook"),
-                "debtToEquity": info.get("debtToEquity"),
-                "returnOnEquity": info.get("returnOnEquity"),
-                "returnOnAssets": info.get("returnOnAssets"),
-                "profitMargins": info.get("profitMargins"),
-                "operatingMargins": info.get("operatingMargins"),
-                "revenueGrowth": info.get("revenueGrowth"),
-                "earningsGrowth": info.get("earningsGrowth"),
-                "freeCashflow": info.get("freeCashflow"),
-                "totalCash": info.get("totalCash"),
-                "totalDebt": info.get("totalDebt"),
-                "bookValue": info.get("bookValue"),
-                "enterpriseValue": info.get("enterpriseValue"),
-                "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh"),
-                "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow"),
-                "averageVolume": info.get("averageVolume"),
-                "currency": info.get("currency") or self._first_value(fast_info, "currency"),
-                "exchange": info.get("exchange") or self._first_value(fast_info, "exchange"),
-                "website": info.get("website"),
-                "longBusinessSummary": (info.get("longBusinessSummary") or "")[:600],
+                "trailingPE": info_value("trailingPE"),
+                "forwardPE": info_value("forwardPE"),
+                "priceToBook": info_value("priceToBook"),
+                "debtToEquity": info_value("debtToEquity"),
+                "returnOnEquity": info_value("returnOnEquity"),
+                "returnOnAssets": info_value("returnOnAssets"),
+                "profitMargins": info_value("profitMargins"),
+                "operatingMargins": info_value("operatingMargins"),
+                "revenueGrowth": info_value("revenueGrowth"),
+                "earningsGrowth": info_value("earningsGrowth"),
+                "freeCashflow": info_value("freeCashflow"),
+                "totalCash": info_value("totalCash"),
+                "totalDebt": info_value("totalDebt"),
+                "bookValue": info_value("bookValue"),
+                "enterpriseValue": info_value("enterpriseValue"),
+                "fiftyTwoWeekHigh": info_value("fiftyTwoWeekHigh"),
+                "fiftyTwoWeekLow": info_value("fiftyTwoWeekLow"),
+                "averageVolume": info_value("averageVolume"),
+                "currency": info_value("currency") or self._first_value(fast_info, "currency"),
+                "exchange": info_value("exchange") or self._first_value(fast_info, "exchange"),
+                "website": info_value("website"),
+                "longBusinessSummary": str(summary)[:600],
             }
 
             warnings = []
@@ -196,10 +224,10 @@ class YFinanceClient:
     async def get_financials(self, symbol: str) -> Dict[str, Any]:
         """Income statement, balance sheet, cash flow – annual."""
         try:
-            t = yf.Ticker(symbol.upper())
-            income = t.financials
-            balance = t.balance_sheet
-            cashflow = t.cashflow
+            t = await self._yf_call(yf.Ticker, symbol.upper())
+            income = await self._yf_call(lambda: t.financials)
+            balance = await self._yf_call(lambda: t.balance_sheet)
+            cashflow = await self._yf_call(lambda: t.cashflow)
 
             return {
                 "symbol": symbol.upper(),
@@ -231,8 +259,8 @@ class YFinanceClient:
 
             actual_period = "5y" if period == "3y" else period
 
-            t = yf.Ticker(symbol.upper())
-            hist = t.history(period=actual_period, interval=interval)
+            t = await self._yf_call(yf.Ticker, symbol.upper())
+            hist = await self._yf_call(t.history, period=actual_period, interval=interval)
             if hist is None or hist.empty:
                 return {"error": "No price history", "symbol": symbol}
 
@@ -261,10 +289,10 @@ class YFinanceClient:
 
     async def get_holders(self, symbol: str) -> Dict[str, Any]:
         try:
-            t = yf.Ticker(symbol.upper())
-            major = t.major_holders
-            institutional = t.institutional_holders
-            insider = t.insider_transactions
+            t = await self._yf_call(yf.Ticker, symbol.upper())
+            major = await self._yf_call(lambda: t.major_holders)
+            institutional = await self._yf_call(lambda: t.institutional_holders)
+            insider = await self._yf_call(lambda: t.insider_transactions)
 
             result: Dict[str, Any] = {"symbol": symbol.upper()}
 
@@ -284,20 +312,26 @@ class YFinanceClient:
 
     async def get_ticker_news(self, symbol: str, limit: int = 8) -> Dict[str, Any]:
         try:
-            t = yf.Ticker(symbol.upper())
-            news = t.news or []
+            t = await self._yf_call(yf.Ticker, symbol.upper())
+            news = await self._yf_call(lambda: t.news or [])
             items = []
-            for n in news[:limit]:
+            for n in news[: max(0, min(int(limit), 50))]:
+                if not isinstance(n, dict):
+                    continue
                 content = n.get("content") or n
+                if not isinstance(content, dict):
+                    content = n
+                provider = content.get("provider")
+                canonical = content.get("canonicalUrl")
                 items.append({
-                    "title": content.get("title") or n.get("title"),
-                    "publisher": content.get("provider", {}).get("displayName")
-                    if isinstance(content.get("provider"), dict)
-                    else n.get("publisher"),
-                    "link": content.get("canonicalUrl", {}).get("url")
-                    if isinstance(content.get("canonicalUrl"), dict)
-                    else n.get("link"),
-                    "published": content.get("pubDate") or n.get("providerPublishTime"),
+                    "title": str(content.get("title") or n.get("title") or ""),
+                    "publisher": str(provider.get("displayName") or "")
+                    if isinstance(provider, dict)
+                    else str(n.get("publisher") or ""),
+                    "link": (canonical.get("url") or "")
+                    if isinstance(canonical, dict)
+                    else (n.get("link") or ""),
+                    "published": _safe(content.get("pubDate") or n.get("providerPublishTime")),
                 })
             return {"symbol": symbol.upper(), "news": items}
         except Exception as e:
@@ -332,6 +366,10 @@ class YFinanceClient:
                 "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO", "OXY", "HES"
             ],
         }
+        try:
+            count = max(1, min(int(count), 10))
+        except (TypeError, ValueError):
+            count = 10
         peers = SECTOR_PEERS.get(sector, SECTOR_PEERS["Consumer Defensive"])[:count]
         results = []
         for sym in peers:

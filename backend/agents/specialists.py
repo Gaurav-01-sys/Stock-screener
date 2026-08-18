@@ -4,7 +4,7 @@ FMCG Specialist Agents – yfinance tools + Piotroski F-Score.
 
 from __future__ import annotations
 from typing import Any, Dict, Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 from governance.policy import GovernanceEngine, AgentIdentity
@@ -51,33 +51,38 @@ class BaseAgent:
             inputs={"tool": tool_name, **kwargs},
             extra={"agent": self.identity.name},
         ) as span:
-            verdict = self.governance.evaluate(
-                agent_id=self.identity.agent_id,
-                action="tool_call",
-                tool_name=tool_name,
-                input_data=kwargs,
-            )
-            if verdict.decision.value != "allow":
-                out = {"error": f"Governance denied: {verdict.reason}"}
-                tracer.end_with_outputs(span, out)
-                return out
-
-            method_name = TOOL_MAP.get(tool_name)
-            if not method_name:
-                out = {"error": f"Unknown tool: {tool_name}"}
-                tracer.end_with_outputs(span, out)
-                return out
-            method = getattr(self.yf, method_name, None)
-            if not method:
-                out = {"error": f"Method not found: {method_name}"}
-                tracer.end_with_outputs(span, out)
-                return out
-
             try:
+                verdict = self.governance.evaluate(
+                    agent_id=self.identity.agent_id,
+                    action="tool_call",
+                    tool_name=tool_name,
+                    input_data=kwargs,
+                )
+                if verdict.decision.value != "allow":
+                    out = {"error": f"Governance denied: {verdict.reason}"}
+                    tracer.end_with_outputs(span, out)
+                    return out
+
+                method_name = TOOL_MAP.get(tool_name)
+                if not method_name:
+                    out = {"error": f"Unknown tool: {tool_name}"}
+                    tracer.end_with_outputs(span, out)
+                    return out
+                method = getattr(self.yf, method_name, None)
+                if not method:
+                    out = {"error": f"Method not found: {method_name}"}
+                    tracer.end_with_outputs(span, out)
+                    return out
+
                 result = await method(**kwargs)
+                if not isinstance(result, dict):
+                    result = {"error": f"Tool returned {type(result).__name__}, expected dict"}
                 cb = self.governance.circuit_breakers.get(self.identity.agent_id)
                 if cb:
-                    cb.record_success()
+                    if isinstance(result, dict) and "error" in result:
+                        cb.record_failure()
+                    else:
+                        cb.record_success()
                 summary = (
                     {"ok": True, "keys": list(result.keys())[:12]}
                     if isinstance(result, dict) and "error" not in result
@@ -216,7 +221,7 @@ class FinancialAgent(BaseAgent):
 
         # Secondary fundamental overlays (small adjustments only)
         if "error" not in info:
-            roe = info.get("returnOnEquity")
+            roe = _num(info.get("returnOnEquity"))
             if roe is not None:
                 roe_pct = roe * 100 if abs(roe) < 5 else roe
                 metrics.append({"name": "ROE", "value": f"{roe_pct:.1f}%"})
@@ -224,10 +229,10 @@ class FinancialAgent(BaseAgent):
                     score = min(100, score + 4)
                 elif roe < 0:
                     score = max(0, score - 5)
-            de = info.get("debtToEquity")
+            de = _num(info.get("debtToEquity"))
             if de is not None:
                 metrics.append({"name": "Debt/Equity", "value": f"{de:.1f}"})
-            margins = info.get("operatingMargins")
+            margins = _num(info.get("operatingMargins"))
             if margins is not None:
                 metrics.append({"name": "Op. Margin", "value": f"{margins * 100:.1f}%"})
 
@@ -280,12 +285,18 @@ class MomentumAgent(BaseAgent):
         returns = {}
 
         if "error" not in hist_score and hist_score.get("prices"):
-            closes = [p["close"] for p in hist_score["prices"] if p.get("close")]
+            closes = [
+                value
+                for p in hist_score["prices"]
+                for value in [_num(p.get("close"))]
+                if value is not None
+            ]
             if len(closes) >= 5:
                 def ret(n):
                     if len(closes) < n + 1:
                         return None
-                    return (closes[-1] - closes[-1 - n]) / closes[-1 - n]
+                    base = closes[-1 - n]
+                    return (closes[-1] - base) / base if base else None
 
                 r1m = ret(21)
                 r3m = ret(63)
@@ -424,8 +435,8 @@ class GrowthAgent(BaseAgent):
         notes = []
 
         if "error" not in info:
-            rg = info.get("revenueGrowth")
-            eg = info.get("earningsGrowth")
+            rg = _num(info.get("revenueGrowth"))
+            eg = _num(info.get("earningsGrowth"))
             if rg is not None:
                 metrics.append({"name": "Revenue Growth", "value": f"{rg*100:.1f}%"})
                 if rg > 0.15:
@@ -495,5 +506,5 @@ class SynthesizerAgent(BaseAgent):
             "scores": scores,
             "details": details,
             "framework": "FMCG",
-            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
